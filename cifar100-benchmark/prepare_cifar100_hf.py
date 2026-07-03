@@ -24,7 +24,9 @@ def convert(split: str) -> None:
     out = ROOT / f"{split}.pt"
     if out.exists():
         data = torch.load(out, map_location="cpu", weights_only=True)
-        print(f"{out}: exists images={tuple(data[images].shape)} labels={tuple(data[labels].shape)}")
+        img_shape = tuple(data["images"].shape)
+        lab_shape = tuple(data["labels"].shape)
+        print(f"{out}: exists images={img_shape} labels={lab_shape}")
         return
     parquet = ROOT / f"{split}.parquet"
     download(URLS[split], parquet)

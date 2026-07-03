@@ -36,6 +36,9 @@ For CIFAR-100 std around 0.4-0.6 percentage points, 50 runs gives SE around 0.06
 
 ## Commands
 
+Use Cineca account `IscrC_SIMP`. The Slurm scripts refuse to run outside `IscrC_SIMP`.
+
+
 ```bash
 cd /leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun
 source env_setup.sh

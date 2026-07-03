@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=c100-discovery
-#SBATCH --account=IscrC_YENDRI
+#SBATCH --account=IscrC_SIMP
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
@@ -12,6 +12,10 @@
 #SBATCH --output=/leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun/logs/discovery-%j.out
 #SBATCH --error=/leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun/logs/discovery-%j.err
 set -euo pipefail
+if [[ "${SLURM_JOB_ACCOUNT:-}" != "iscrc_simp" && "${SLURM_JOB_ACCOUNT:-}" != "IscrC_SIMP" ]]; then
+  echo "Refusing to run outside IscrC_SIMP." >&2
+  exit 2
+fi
 cd /leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun
 source env_setup.sh
 echo "==> $(date) job=${SLURM_JOB_ID:-N/A} node=$(hostname)"
