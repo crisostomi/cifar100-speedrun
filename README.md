@@ -31,7 +31,8 @@ For CIFAR-100 std around 0.4-0.6 percentage points, 50 runs gives SE around 0.06
 - `cifar100-benchmark/train_cifar100_baseline.py`: older CIFAR-10 speedrun-derived adaptation kept only as a reference, not the default baseline.
 - `cifar100-benchmark/prepare_cifar100.py`: downloads and packs CIFAR-100 into `train.pt` and `test.pt`.
 - `cifar100-benchmark/analyze_cifar100.py`: parses benchmark logs and reports mean accuracy, time, and p-value approximation.
-- `slurm/discovery.sh`: target discovery.
+- `slurm/smoke.sh`: one tiny run to verify the benchmark executes; not evidence for target choice.
+- `slurm/discovery.sh`: target discovery, not run during setup.
 - `slurm/official_baseline.sh`: 50-run baseline once target/epochs are locked.
 
 ## Commands
@@ -43,7 +44,8 @@ Use Cineca account `IscrC_SIMP`. The Slurm scripts refuse to run outside `IscrC_
 cd /leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun
 source env_setup.sh
 python prepare_cifar100.py
-sbatch slurm/discovery.sh
+sbatch slurm/smoke.sh
+# Only after choosing to collect baseline evidence: sbatch slurm/discovery.sh
 ```
 
 ## Hard validation rules
