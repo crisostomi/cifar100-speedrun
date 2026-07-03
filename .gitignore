@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+logs/
+cifar100-benchmark/cifar100/
