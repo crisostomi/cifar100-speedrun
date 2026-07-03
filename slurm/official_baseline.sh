@@ -16,7 +16,7 @@ cd /leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun
 source env_setup.sh
 echo "==> $(date) job=${SLURM_JOB_ID:-N/A} node=$(hostname)"
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
-python prepare_cifar100.py
+python prepare_cifar100_hf.py
 TARGET=${TARGET:-0.65}
 C100_RUNS=${RUNS:-50} C100_EPOCHS=${EPOCHS:-24} C100_SLEEP_CYCLES=1000000000 python train_cifar100_baseline.py
 python analyze_cifar100.py "/leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun/logs/baseline-${SLURM_JOB_ID}.out" --target "$TARGET" || true
