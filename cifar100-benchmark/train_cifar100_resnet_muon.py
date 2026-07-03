@@ -1,4 +1,17 @@
 
+"""CIFAR-100 single-A100 speedrun baseline.
+
+BENCHMARK CONTRACT
+- Validation is frozen. Do not optimize, tune, branch, adapt, augment, or compile
+  against the validation path as a benchmark improvement. Validation is an
+  untimed pass/fail gate only.
+- Compilation, data staging, warmup, logging, and measurement boundaries are
+  benchmark infrastructure. Do not optimize them for record claims. They may
+  only be changed to fix correctness/portability bugs while preserving semantics.
+- The only admissible optimization surfaces are model architecture, optimizer,
+  and training hyperparameters inside the timed training loop.
+"""
+
 import math
 import os
 import random
@@ -149,6 +162,9 @@ def batches(images, labels, batch_size):
         yield images[idx], labels[idx]
 
 
+# Frozen validation gate. This function is outside the timed score and is not
+# an optimization surface: no TTA, TTT, ensembling, confidence branches, BN
+# adaptation, validation-label feedback, or benchmark-specific compilation games.
 @torch.no_grad()
 def evaluate(model, images, labels, batch_size=1000):
     model.eval()
@@ -182,6 +198,8 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
+    # Timed training begins here. Only architecture, optimizer, and training
+    # hyperparameters inside this region are valid speedrun optimization surfaces.
     starter.record()
     model.train()
     while step < total_steps:
@@ -199,6 +217,7 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
             step += 1
             if step >= total_steps:
                 break
+    # Timed training ends here. Validation remains an untimed correctness gate.
     ender.record(); torch.cuda.synchronize()
     time_seconds = starter.elapsed_time(ender) * 1e-3
     val_acc = evaluate(model, test_images, test_labels)
@@ -220,6 +239,9 @@ def main():
     compile_enabled = os.getenv("C100_COMPILE", "1") != "0"
     compile_mode = os.getenv("C100_COMPILE_MODE", "default")
     model = SimpleResNet().cuda().to(torch.float16).to(memory_format=torch.channels_last)
+    # Compile is infrastructure, not a record surface. It is paid in warmup and
+    # must not be tuned as a benchmark trick; use it only to make the fixed
+    # training implementation run normally on the target stack.
     if compile_enabled:
         if compile_mode in ("", "default", "none"):
             model.compile()
