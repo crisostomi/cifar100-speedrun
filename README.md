@@ -2,30 +2,31 @@
 
 Remote path: `/leonardo_work/IscrC_YENDRI/paerle/Cifar100Speedrun`.
 
-Goal: train on official CIFAR-100 train images and reach a fixed plain validation accuracy target `k = 60%` on a single A100 in the least training time possible.
+Goal: train on official CIFAR-100 train images and reach a fixed plain validation accuracy target `k = 70%` on a single A100 in the least training time possible.
 
 Inspired by Keller Jordan CIFAR-10 Airbench and the local Leonardo CIFAR-10 replication, but validation is stricter: no TTA, no TTT, no confidence-triggered evaluation path, no ensembling, no validation-time adaptation, no calibration on validation labels.
 
 ## Chosen constants
 
-- Target: `k = 60%` plain validation accuracy.
+- Target: `k = 70%` plain validation accuracy.
 - Official run count: 30 runs.
+- Official epoch budget: 14 epochs.
 - Baseline: `train_cifar100_resnet_muon.py` only.
-- Compiled baseline: enabled by default with `torch.compile` / `C100_COMPILE=1`; warmup pays the compile cost before measured runs.
+- Compiled baseline: enabled by default with `torch.compile` / `C100_COMPILE=1`, default `C100_COMPILE_MODE=reduce-overhead`; warmup pays compile/cold-start cost before measured runs. `max-autotune` is intentionally not the default because it can spend minutes autotuning on Leonardo.
 - Timed quantity: training time only; validation stays frozen and untimed.
 
 ## Record metric
 
 Every record must report both:
 
-1. Absolute score: mean `time_seconds` over 30 official runs while clearing `mean(val_acc) > k`, where `k = 60%` plain validation accuracy.
+1. Absolute score: mean `time_seconds` over 30 official runs while clearing `mean(val_acc) > k`, where `k = 70%` plain validation accuracy.
 2. Relative score: paired same-pod comparison against a replication of the baseline or last record, with the same seed/run list, reporting time ratio and delta.
 
 A claim without the relative same-pod replication is not a record. This protects against A100, driver, node, clock, and thermal differences.
 
 ## Target and runs
 
-Chosen target: `k = 60%` plain validation accuracy.
+Chosen target: `k = 70%` plain validation accuracy.
 
 Chosen official run count: 30 runs. Fast triage may use 40 runs, smoke checks use 1 run, and 200 runs are reserved only for a final public artifact if 30-run uncertainty is disputed.
 
@@ -40,7 +41,7 @@ For CIFAR-100 std around 0.4-0.6 percentage points, 30 runs gives SE around 0.06
 - `cifar100-benchmark/analyze_cifar100.py`: parses benchmark logs and reports mean accuracy, time, and p-value approximation.
 - `slurm/smoke.sh`: one tiny run to verify the benchmark executes; not evidence for target choice.
 - `slurm/discovery.sh`: target discovery, not run during setup.
-- `slurm/official_baseline.sh`: 30-run official baseline for `k = 60%`.
+- `slurm/official_baseline.sh`: 30-run official baseline for `k = 70%`.
 
 ## Commands
 
@@ -65,4 +66,4 @@ sbatch slurm/smoke.sh
 
 ## Feasibility note
 
-The `k = 60%` target is mechanically configured but not yet empirically validated for the simple 12-epoch Muon-ResNet baseline. The smoke check only proves the code path executes. Run `slurm/official_baseline.sh` to measure whether the baseline clears 60% over 30 runs.
+The `k = 70%` target is mechanically configured but not yet empirically validated for the simple 12-epoch Muon-ResNet baseline. The smoke check only proves the code path executes. Run `slurm/official_baseline.sh` to measure whether the baseline clears 70% over 30 runs.

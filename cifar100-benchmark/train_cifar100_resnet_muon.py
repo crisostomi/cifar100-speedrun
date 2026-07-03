@@ -210,15 +210,15 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
 
 def main():
     runs = int(os.getenv("C100_RUNS", "30"))
-    epochs = float(os.getenv("C100_EPOCHS", "12"))
+    epochs = float(os.getenv("C100_EPOCHS", "14"))
     batch_size = int(os.getenv("C100_BATCH", "1024"))
-    target = float(os.getenv("C100_TARGET", "0.60"))
+    target = float(os.getenv("C100_TARGET", "0.70"))
     seed_base = int(os.getenv("C100_SEED_BASE", "880000"))
     sleep_cycles = int(os.getenv("C100_SLEEP_CYCLES", "1000000000"))
     train_images, train_labels = load_split("train")
     test_images, test_labels = load_split("test")
     compile_enabled = os.getenv("C100_COMPILE", "1") != "0"
-    compile_mode = os.getenv("C100_COMPILE_MODE", "max-autotune")
+    compile_mode = os.getenv("C100_COMPILE_MODE", "reduce-overhead")
     model = SimpleResNet().cuda().to(torch.float16).to(memory_format=torch.channels_last)
     if compile_enabled:
         model.compile(mode=compile_mode)
