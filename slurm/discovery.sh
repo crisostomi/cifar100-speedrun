@@ -18,10 +18,10 @@ echo "==> $(date) job=${SLURM_JOB_ID:-N/A} node=$(hostname)"
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
 python prepare_cifar100_hf.py
 RUNS=${RUNS:-5}
-TARGET=${TARGET:-0.65}
-for EPOCHS in ${EPOCHS_LIST:-8 12 16 24 32}; do
+TARGET=${TARGET:-0.50}
+for EPOCHS in ${EPOCHS_LIST:-4 8 12 16 20}; do
   echo "===== CIFAR100 discovery epochs=${EPOCHS} runs=${RUNS} target=${TARGET} ====="
-  C100_RUNS=$RUNS C100_EPOCHS=$EPOCHS C100_SLEEP_CYCLES=1000000000 python train_cifar100_baseline.py
+  C100_RUNS=$RUNS C100_EPOCHS=$EPOCHS C100_SLEEP_CYCLES=1000000000 python train_cifar100_resnet_muon.py
   echo
  done
 echo "==> done $(date)"

@@ -19,7 +19,7 @@ A claim without the relative same-pod replication is not a record. This protects
 
 Use `slurm/discovery.sh` first. It runs 5 seeds at epoch budgets 8, 12, 16, 24, 32.
 
-Provisional target before pilot data: `k = 65%` plain validation accuracy. If 24 epochs is far above 67%, raise to 70%; if below 63%, lower to 60% or increase the baseline budget. The target should be 0.2-0.5 percentage points below the official 40/50-run baseline mean.
+Provisional target before pilot data: `k = 50%` plain validation accuracy for the intentionally simple Muon-ResNet baseline. If the 12-epoch baseline is far above 55%, raise to 55% or 60%; if below 48%, lower to 45% or increase the baseline budget. The target should be 0.2-0.5 percentage points below the official 40/50-run baseline mean.
 
 Official run count: 50. Fast triage: 40. Discovery only: 5. Keep 200 runs only for a final public artifact if 50-run uncertainty is disputed.
 
@@ -27,7 +27,8 @@ For CIFAR-100 std around 0.4-0.6 percentage points, 50 runs gives SE around 0.06
 
 ## Files
 
-- `cifar100-benchmark/train_cifar100_baseline.py`: CIFAR-10 speedrun-derived baseline adapted to CIFAR-100. It keeps the old `tta_val_acc` column name, but the value is plain no-TTA validation accuracy.
+- `cifar100-benchmark/train_cifar100_resnet_muon.py`: default baseline, a deliberately simple eager PyTorch ResNet trained with Muon. This is the benchmark substrate.
+- `cifar100-benchmark/train_cifar100_baseline.py`: older CIFAR-10 speedrun-derived adaptation kept only as a reference, not the default baseline.
 - `cifar100-benchmark/prepare_cifar100.py`: downloads and packs CIFAR-100 into `train.pt` and `test.pt`.
 - `cifar100-benchmark/analyze_cifar100.py`: parses benchmark logs and reports mean accuracy, time, and p-value approximation.
 - `slurm/discovery.sh`: target discovery.
