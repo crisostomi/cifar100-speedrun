@@ -163,9 +163,15 @@ def evaluate(model, images, labels, batch_size=1000):
     return correct / total
 
 
-def train_once(run_name, seed, train_images, train_labels, test_images, test_labels, epochs, batch_size, target):
+def reset_model(model):
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+
+
+def train_once(run_name, seed, model, train_images, train_labels, test_images, test_labels, epochs, batch_size, target):
     seed_all(seed)
-    model = SimpleResNet().cuda().to(torch.float16).to(memory_format=torch.channels_last)
+    reset_model(model)
     muon_params = [p for p in model.parameters() if p.ndim >= 2]
     other_params = [p for p in model.parameters() if p.ndim < 2]
     muon = Muon(muon_params, lr=float(os.getenv("C100_MUON_LR", "0.035")), momentum=0.95, weight_decay=2e-4)
@@ -211,17 +217,22 @@ def main():
     sleep_cycles = int(os.getenv("C100_SLEEP_CYCLES", "1000000000"))
     train_images, train_labels = load_split("train")
     test_images, test_labels = load_split("test")
-    print(f"config model=simple_resnet_muon runs={runs} epochs={epochs} batch={batch_size} target={target} no_tta=1")
+    compile_enabled = os.getenv("C100_COMPILE", "1") != "0"
+    compile_mode = os.getenv("C100_COMPILE_MODE", "max-autotune")
+    model = SimpleResNet().cuda().to(torch.float16).to(memory_format=torch.channels_last)
+    if compile_enabled:
+        model.compile(mode=compile_mode)
+    print(f"config model=simple_resnet_muon runs={runs} epochs={epochs} batch={batch_size} target={target} compile={int(compile_enabled)} compile_mode={compile_mode if compile_enabled else off} no_tta=1")
     print("---------------------------------------------------------------------------------")
     print("|  run     |  epoch  |  train_acc  |  val_acc  |  target_hit   |  time_seconds  |")
     print("---------------------------------------------------------------------------------")
-    train_once("warmup", seed_base - 1, train_images, train_labels, test_images, test_labels, min(1.0, epochs), batch_size, target)
+    train_once("warmup", seed_base - 1, model, train_images, train_labels, test_images, test_labels, min(1.0, epochs), batch_size, target)
     vals, times = [], []
     for run in range(runs):
         torch.cuda.empty_cache(); torch.cuda.synchronize()
         if sleep_cycles > 0:
             torch.cuda._sleep(sleep_cycles)
-        val, sec = train_once(run + 1, seed_base + run, train_images, train_labels, test_images, test_labels, epochs, batch_size, target)
+        val, sec = train_once(run + 1, seed_base + run, model, train_images, train_labels, test_images, test_labels, epochs, batch_size, target)
         vals.append(val); times.append(sec)
         print(f"Mean val accuracy after {run + 1} runs: {sum(vals) / len(vals):.6f} | Mean time: {sum(times) / len(times):.6f}s", end="\r", flush=True)
     print()

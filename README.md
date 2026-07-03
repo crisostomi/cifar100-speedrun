@@ -11,6 +11,7 @@ Inspired by Keller Jordan CIFAR-10 Airbench and the local Leonardo CIFAR-10 repl
 - Target: `k = 60%` plain validation accuracy.
 - Official run count: 30 runs.
 - Baseline: `train_cifar100_resnet_muon.py` only.
+- Compiled baseline: enabled by default with `torch.compile` / `C100_COMPILE=1`; warmup pays the compile cost before measured runs.
 - Timed quantity: training time only; validation stays frozen and untimed.
 
 ## Record metric
@@ -34,7 +35,7 @@ For CIFAR-100 std around 0.4-0.6 percentage points, 30 runs gives SE around 0.06
 
 ## Files
 
-- `cifar100-benchmark/train_cifar100_resnet_muon.py`: default and only baseline, a deliberately simple eager PyTorch ResNet trained with Muon. This is the benchmark substrate.
+- `cifar100-benchmark/train_cifar100_resnet_muon.py`: default and only baseline, a deliberately simple PyTorch ResNet trained with Muon and compiled by default. This is the benchmark substrate.
 - `cifar100-benchmark/prepare_cifar100.py`: downloads and packs CIFAR-100 into `train.pt` and `test.pt`.
 - `cifar100-benchmark/analyze_cifar100.py`: parses benchmark logs and reports mean accuracy, time, and p-value approximation.
 - `slurm/smoke.sh`: one tiny run to verify the benchmark executes; not evidence for target choice.
