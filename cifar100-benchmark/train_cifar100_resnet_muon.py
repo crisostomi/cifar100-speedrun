@@ -203,10 +203,10 @@ def train_once(run_name, seed, train_images, train_labels, test_images, test_lab
 
 
 def main():
-    runs = int(os.getenv("C100_RUNS", "50"))
+    runs = int(os.getenv("C100_RUNS", "30"))
     epochs = float(os.getenv("C100_EPOCHS", "12"))
     batch_size = int(os.getenv("C100_BATCH", "1024"))
-    target = float(os.getenv("C100_TARGET", "0.50"))
+    target = float(os.getenv("C100_TARGET", "0.60"))
     seed_base = int(os.getenv("C100_SEED_BASE", "880000"))
     sleep_cycles = int(os.getenv("C100_SLEEP_CYCLES", "1000000000"))
     train_images, train_labels = load_split("train")
