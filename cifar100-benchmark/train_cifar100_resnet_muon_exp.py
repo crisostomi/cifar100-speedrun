@@ -30,6 +30,17 @@ import torch.nn.functional as F
 
 
 torch.backends.cudnn.benchmark = True
+# Infra-only knob C100_DYNAMO_CACHE_LIMIT: raise the TorchDynamo compiled-graph
+# cache limits so that toggling input resolution (progressive resize) across many
+# runs never evicts + recompiles a graph INSIDE the timed region (the eviction
+# spikes seen at 20px). Unset -> library defaults (baseline). This is a pure
+# compile-stability config and preserves training semantics exactly -- no kernels,
+# math, or the timing boundary change; it only stops recompilation being measured.
+_DYNAMO_CACHE_LIMIT = os.getenv("C100_DYNAMO_CACHE_LIMIT", "")
+if _DYNAMO_CACHE_LIMIT:
+    import torch._dynamo
+    torch._dynamo.config.cache_size_limit = int(_DYNAMO_CACHE_LIMIT)
+    torch._dynamo.config.accumulated_cache_size_limit = max(int(_DYNAMO_CACHE_LIMIT), 256)
 # Precision knob: fp16 (baseline) casts model+data to float16; bf16 casts to
 # bfloat16 instead. MEAN/STD carry the same dtype so normalize() stays in-dtype.
 # Loss is always computed via logits.float() regardless of this setting.
