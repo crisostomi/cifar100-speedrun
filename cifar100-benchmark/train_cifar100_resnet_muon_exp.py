@@ -73,6 +73,68 @@ def random_crop_flip(x, pad=4):
     return torch.where(flip, out.flip(-1), out).contiguous(memory_format=torch.channels_last)
 
 
+# Module-level ResNet-D flag (knob C100_RESNET_D). Read once at import; gates the
+# downsampling skip-path construction inside Block. Default "0" -> exact baseline
+# stride-2 1x1 conv skip.
+_RESNET_D = os.getenv("C100_RESNET_D", "0") == "1"
+
+
+class GhostBatchNorm(nn.BatchNorm2d):
+    """Ghost BatchNorm (knob C100_GHOST_BN).
+
+    TRAINING mode: normalizes over virtual sub-batches ("ghost" batches) of size
+    `ghost_size` -- the incoming batch is split into chunks of that many samples
+    and each chunk is normalized by its own batch statistics. Running stats are
+    updated per chunk with the momentum divided by the number of chunks, so the
+    aggregate per-forward running-stat update stays comparable to a single
+    standard-BN forward. EVAL mode: byte-for-byte a standard nn.BatchNorm2d
+    forward (uses the running stats), so the frozen validation path is unchanged.
+
+    Subclasses nn.BatchNorm2d on purpose so isinstance(m, nn.BatchNorm2d) still
+    matches (the BN-bias LR-split knob relies on that) and so the affine params,
+    running buffers, and reset_parameters() are inherited unchanged.
+    """
+
+    def __init__(self, num_features, ghost_size, **kwargs):
+        super().__init__(num_features, **kwargs)
+        self.ghost_size = int(ghost_size)
+
+    def forward(self, x):
+        if not self.training:
+            # Eval path: identical to standard BatchNorm2d (running stats).
+            return super().forward(x)
+        n = x.shape[0]
+        g = min(self.ghost_size, n) if self.ghost_size > 0 else n
+        chunks = torch.split(x, g, dim=0)  # last chunk may be smaller (remainder)
+        n_splits = len(chunks)
+        # Divide momentum by the split count so per-forward running-stat drift
+        # stays comparable to standard BN. (None momentum -> cumulative average.)
+        mom = self.momentum / n_splits if self.momentum is not None else None
+        outs = [
+            F.batch_norm(
+                chunk, self.running_mean, self.running_var,
+                self.weight, self.bias, True, mom, self.eps,
+            )
+            for chunk in chunks
+        ]
+        return torch.cat(outs, dim=0)
+
+
+def convert_to_ghost_bn(module, ghost_size):
+    """Recursively swap every nn.BatchNorm2d for a GhostBatchNorm carrying the
+    same configuration. Called only when C100_GHOST_BN > 0."""
+    for name, child in module.named_children():
+        if isinstance(child, nn.BatchNorm2d) and not isinstance(child, GhostBatchNorm):
+            ghost = GhostBatchNorm(
+                child.num_features, ghost_size,
+                eps=child.eps, momentum=child.momentum,
+                affine=child.affine, track_running_stats=child.track_running_stats,
+            )
+            setattr(module, name, ghost)
+        else:
+            convert_to_ghost_bn(child, ghost_size)
+
+
 class Block(nn.Module):
     def __init__(self, channels_in, channels_out, stride=1):
         super().__init__()
@@ -80,10 +142,24 @@ class Block(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels_out)
         self.conv2 = nn.Conv2d(channels_out, channels_out, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels_out)
-        self.skip = nn.Identity() if channels_in == channels_out and stride == 1 else nn.Sequential(
-            nn.Conv2d(channels_in, channels_out, 1, stride=stride, bias=False),
-            nn.BatchNorm2d(channels_out),
-        )
+        if channels_in == channels_out and stride == 1:
+            self.skip = nn.Identity()
+        elif _RESNET_D:
+            # ResNet-D downsampling skip (knob C100_RESNET_D): AvgPool for the
+            # spatial downsample, then a stride-1 1x1 projection + BN. The main
+            # path conv1 keeps its own stride. Off -> the baseline stride-2 1x1
+            # conv skip in the else branch.
+            skip_layers = []
+            if stride != 1:
+                skip_layers.append(nn.AvgPool2d(2, 2, ceil_mode=True))
+            skip_layers.append(nn.Conv2d(channels_in, channels_out, 1, stride=1, bias=False))
+            skip_layers.append(nn.BatchNorm2d(channels_out))
+            self.skip = nn.Sequential(*skip_layers)
+        else:
+            self.skip = nn.Sequential(
+                nn.Conv2d(channels_in, channels_out, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(channels_out),
+            )
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
@@ -245,8 +321,6 @@ def reset_model(model):
 def train_once(run_name, seed, model, train_images, train_labels, test_images, test_labels, epochs, batch_size, target):
     seed_all(seed)
     reset_model(model)
-    muon_params = [p for p in model.parameters() if p.ndim >= 2]
-    other_params = [p for p in model.parameters() if p.ndim < 2]
     muon_lr = float(os.getenv("C100_MUON_LR", "0.035"))
     bias_lr = float(os.getenv("C100_BIAS_LR", "0.02"))
     muon_momentum = float(os.getenv("C100_MUON_MOMENTUM", "0.95"))
@@ -259,11 +333,91 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
     warmup_frac = float(os.getenv("C100_WARMUP_FRAC", "0.0"))
     cooldown_frac = float(os.getenv("C100_COOLDOWN_FRAC", "0.0"))
     crop_pad = int(os.getenv("C100_CROP_PAD", "4"))
+    # --- Knob C100_HEAD_OPT / C100_HEAD_LR: which optimizer owns head.weight.
+    head_opt = os.getenv("C100_HEAD_OPT", "muon")
+    head_lr = float(os.getenv("C100_HEAD_LR", "0.001"))
+    # --- Knob C100_BN_SHIFT_LR_MULT: separate LR factor for BN bias (beta) only.
+    bn_shift_lr_mult = float(os.getenv("C100_BN_SHIFT_LR_MULT", "1.0"))
+    # --- Knob C100_DIRAC_INIT: partial-identity init of body 3x3 convs.
+    dirac_init = os.getenv("C100_DIRAC_INIT", "0") == "1"
+    # --- Knob C100_EMA_DECAY: EMA of all params+buffers, evaluated after timer.
+    ema_decay = float(os.getenv("C100_EMA_DECAY", "0.0"))
+    ema_enabled = ema_decay > 0.0
+    # --- Knob C100_LOOKAHEAD_K / _ALPHA: Lookahead over the Muon+SGD inner loop.
+    lookahead_k = int(os.getenv("C100_LOOKAHEAD_K", "0"))
+    lookahead_alpha = float(os.getenv("C100_LOOKAHEAD_ALPHA", "0.5"))
+    lookahead_enabled = lookahead_k > 0
+    # (EMA and Lookahead are meant to be mutually exclusive; if both are set, both
+    # simply run -- the Lookahead sync happens first, then EMA reads the params.)
+    # --- Knob C100_RESIZE_PX / _FRAC: progressive input resizing (train only).
+    resize_px = int(os.getenv("C100_RESIZE_PX", "0"))
+    resize_frac = float(os.getenv("C100_RESIZE_FRAC", "0.0"))
+    resize_enabled = resize_px > 0 and resize_frac > 0.0
+
+    # Partial-identity (Dirac) init of the two body 3x3 convs per Block. Applied
+    # AFTER reset_model (so it overrides the default init) and BEFORE the timer.
+    # Uses no RNG, so with the knob off the RNG stream is untouched.
+    if dirac_init:
+        for m in model.modules():
+            if isinstance(m, Block):
+                torch.nn.init.dirac_(m.conv1.weight)
+                torch.nn.init.dirac_(m.conv2.weight)
+
+    # Build parameter groups. head.weight is identified by identity (never shape).
+    head_param = model.head.weight
+    head_in_muon = head_opt not in ("sgd", "adam")
+    # BN bias (beta) params get their own SGD group ONLY when the shift mult is
+    # non-trivial; with mult == 1.0 we keep the single baseline group, so behavior
+    # is byte-for-byte identical (splitting into two equal-LR/equal-momentum SGD
+    # groups is numerically identical anyway, since SGD updates each param
+    # independently with per-param momentum state).
+    bn_bias_ids = set()
+    if bn_shift_lr_mult != 1.0:
+        for m in model.modules():
+            if isinstance(m, nn.BatchNorm2d) and m.bias is not None:
+                bn_bias_ids.add(id(m.bias))
+    muon_params = []
+    sgd_other_params = []
+    bn_bias_params = []
+    for p in model.parameters():
+        if p is head_param and not head_in_muon:
+            if head_opt == "sgd":
+                sgd_other_params.append(p)
+            # head_opt == "adam" -> optimized by its own Adam group (below).
+            continue
+        if p.ndim >= 2:
+            muon_params.append(p)
+        elif id(p) in bn_bias_ids:
+            bn_bias_params.append(p)
+        else:
+            sgd_other_params.append(p)
+
     muon = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=2e-4, nesterov=nesterov, ns_steps=ns_steps)
-    sgd = torch.optim.SGD(other_params, lr=bias_lr, momentum=0.9, nesterov=True)
+    sgd_groups = [{"params": sgd_other_params}]
+    if bn_bias_params:
+        sgd_groups.append({"params": bn_bias_params, "lr": bias_lr * bn_shift_lr_mult})
+    sgd = torch.optim.SGD(sgd_groups, lr=bias_lr, momentum=0.9, nesterov=True)
+    sgd_base_lrs = [g["lr"] for g in sgd.param_groups]
+    head_adam = torch.optim.Adam([head_param], lr=head_lr) if head_opt == "adam" else None
+
     steps_per_epoch = len(train_images) // batch_size
     total_steps = max(1, int(math.ceil(epochs * steps_per_epoch)))
+    resize_until = resize_frac * total_steps
     step = 0
+
+    # EMA / Lookahead shadow state is captured here -- AFTER reset_model + Dirac
+    # init, BEFORE the timer -- so it is pure setup, not timed work.
+    if ema_enabled:
+        ema_targets = list(model.parameters()) + list(model.buffers())
+        ema_is_float = [t.is_floating_point() for t in ema_targets]
+        # fp32 shadow for float tensors so the (1-decay) increment does not
+        # underflow in bf16/fp16 over a short (~hundreds of steps) run; non-float
+        # buffers (num_batches_tracked) are cloned as-is.
+        ema_shadow = [t.detach().float() if f else t.detach().clone() for t, f in zip(ema_targets, ema_is_float)]
+    if lookahead_enabled:
+        lookahead_params = list(model.parameters())
+        lookahead_slow = [p.detach().clone() for p in lookahead_params]
+
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
     torch.cuda.synchronize()
@@ -274,6 +428,13 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
     while step < total_steps:
         for x, y in batches(train_images, train_labels, batch_size):
             x = normalize(random_crop_flip(x, pad=crop_pad))
+            # Knob C100_RESIZE_*: bilinearly downscale the (already cropped +
+            # normalized) TRAIN batch for the first resize_frac of steps. Inside
+            # the timed region. Eval is never resized, so the frozen 32x32 val
+            # path stays legal.
+            if resize_enabled and step < resize_until:
+                x = F.interpolate(x, size=(resize_px, resize_px), mode="bilinear", align_corners=False)
+                x = x.contiguous(memory_format=torch.channels_last)
             logits = model(x)
             loss = F.cross_entropy(logits.float(), y, label_smoothing=label_smoothing)
             loss.backward()
@@ -281,17 +442,56 @@ def train_once(run_name, seed, model, train_images, train_labels, test_images, t
             mom = muon_momentum_at(step, total_steps, muon_momentum, mom_warmup, mom_start)
             muon.param_groups[0]["lr"] = muon_lr * lr_mult
             muon.param_groups[0]["momentum"] = mom
-            sgd.param_groups[0]["lr"] = bias_lr * lr_mult
+            # Scale every SGD group (baseline group 0, plus optional BN-bias group)
+            # by the scheduled multiplier off its own base LR.
+            for gi, g in enumerate(sgd.param_groups):
+                g["lr"] = sgd_base_lrs[gi] * lr_mult
+            if head_adam is not None:
+                head_adam.param_groups[0]["lr"] = head_lr * lr_mult
             muon.step(); sgd.step()
+            if head_adam is not None:
+                head_adam.step()
             muon.zero_grad(set_to_none=True); sgd.zero_grad(set_to_none=True)
+            if head_adam is not None:
+                head_adam.zero_grad(set_to_none=True)
             step += 1
+            # Lookahead slow-weight sync (inside the timed region). Every k steps:
+            # slow += alpha*(fast - slow); fast <- slow. Params only, not buffers.
+            if lookahead_enabled and step % lookahead_k == 0:
+                with torch.no_grad():
+                    for slow_t, fast_t in zip(lookahead_slow, lookahead_params):
+                        slow_t.add_(fast_t.detach() - slow_t, alpha=lookahead_alpha)
+                        fast_t.copy_(slow_t)
+            # EMA update (inside the timed region), after any Lookahead sync so the
+            # shadow tracks the post-sync params. All params AND buffers tracked;
+            # non-float buffers (num_batches_tracked) are copied, not averaged.
+            if ema_enabled:
+                with torch.no_grad():
+                    for shadow_t, cur_t, is_f in zip(ema_shadow, ema_targets, ema_is_float):
+                        if is_f:
+                            shadow_t.mul_(ema_decay).add_(cur_t.detach().float(), alpha=1.0 - ema_decay)
+                        else:
+                            shadow_t.copy_(cur_t)
             if step >= total_steps:
                 break
     # Timed training ends here. Validation remains an untimed correctness gate.
     ender.record(); torch.cuda.synchronize()
     time_seconds = starter.elapsed_time(ender) * 1e-3
+    # Knob C100_EMA_DECAY (eval side, AFTER the timer): swap the EMA shadow into
+    # the model so the reported accuracies are the EMA model's -- preregistered
+    # and unconditional, never a val-gated choice. Raw weights are saved first and
+    # restored after eval so nothing downstream breaks.
+    if ema_enabled:
+        with torch.no_grad():
+            raw_state = [t.detach().clone() for t in ema_targets]
+            for shadow_t, cur_t in zip(ema_shadow, ema_targets):
+                cur_t.copy_(shadow_t)
     val_acc = evaluate(model, test_images, test_labels)
     train_acc = evaluate(model, train_images[:10000], train_labels[:10000])
+    if ema_enabled:
+        with torch.no_grad():
+            for raw_t, cur_t in zip(raw_state, ema_targets):
+                cur_t.copy_(raw_t)
     hit = float(val_acc >= target)
     print(f"|  {str(run_name).rjust(6)}  |   eval  |     {train_acc:0.4f}  |   {val_acc:0.4f}  |       {hit:0.4f}  |      {time_seconds:0.4f}  |", flush=True)
     return val_acc, time_seconds
@@ -310,7 +510,13 @@ def main():
     test_images, test_labels = load_split("test")
     compile_enabled = os.getenv("C100_COMPILE", "1") != "0"
     compile_mode = os.getenv("C100_COMPILE_MODE", "default")
-    model = SimpleResNet(widths=widths, blocks=blocks).cuda().to(_DTYPE).to(memory_format=torch.channels_last)
+    ghost_bn = int(os.getenv("C100_GHOST_BN", "0"))
+    model = SimpleResNet(widths=widths, blocks=blocks)
+    # Knob C100_GHOST_BN: swap standard BN for GhostBatchNorm before moving to
+    # device/dtype and before compile. ghost_bn == 0 -> untouched standard BN.
+    if ghost_bn > 0:
+        convert_to_ghost_bn(model, ghost_bn)
+    model = model.cuda().to(_DTYPE).to(memory_format=torch.channels_last)
     # Compile is infrastructure, not a record surface. It is paid in warmup and
     # must not be tuned as a benchmark trick; use it only to make the fixed
     # training implementation run normally on the target stack.
@@ -333,6 +539,17 @@ def main():
         f" muon_mom={float(os.getenv('C100_MUON_MOMENTUM', '0.95'))}"
         f" mom_warmup={float(os.getenv('C100_MUON_MOM_WARMUP', '0.0'))}"
         f" crop_pad={int(os.getenv('C100_CROP_PAD', '4'))}"
+        f" head_opt={os.getenv('C100_HEAD_OPT', 'muon')}"
+        f" head_lr={float(os.getenv('C100_HEAD_LR', '0.001'))}"
+        f" bn_shift_lr_mult={float(os.getenv('C100_BN_SHIFT_LR_MULT', '1.0'))}"
+        f" ema_decay={float(os.getenv('C100_EMA_DECAY', '0.0'))}"
+        f" lookahead_k={int(os.getenv('C100_LOOKAHEAD_K', '0'))}"
+        f" lookahead_alpha={float(os.getenv('C100_LOOKAHEAD_ALPHA', '0.5'))}"
+        f" ghost_bn={int(os.getenv('C100_GHOST_BN', '0'))}"
+        f" dirac_init={int(os.getenv('C100_DIRAC_INIT', '0') == '1')}"
+        f" resnet_d={int(os.getenv('C100_RESNET_D', '0') == '1')}"
+        f" resize_px={int(os.getenv('C100_RESIZE_PX', '0'))}"
+        f" resize_frac={float(os.getenv('C100_RESIZE_FRAC', '0.0'))}"
         f" widths={','.join(str(w) for w in widths)}"
         f" blocks={','.join(str(x) for x in blocks)}"
     )
